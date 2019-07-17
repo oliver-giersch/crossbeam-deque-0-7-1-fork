@@ -22,10 +22,12 @@ keywords = ["chase-lev", "lock-free", "scheduler", "scheduling"]
 categories = ["algorithms", "concurrency", "data-structures"]
 license = "MIT/Apache-2.0"
 repository = "https://github.com/crossbeam-rs/crossbeam"
+
 [dependencies.crossbeam-epoch]
 version = "0.7"
 
 [dependencies.crossbeam-utils]
 version = "0.6.5"
+
 [dev-dependencies.rand]
 version = "0.6"

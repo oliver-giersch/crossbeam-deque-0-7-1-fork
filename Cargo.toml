@@ -25,6 +25,7 @@ repository = "https://github.com/crossbeam-rs/crossbeam"
 
 [dependencies.debra]
 git = "https://github.com/oliver-giersch/debra"
+features = ["bag-size-4"]
 
 [dependencies.crossbeam-utils]
 version = "0.6.5"

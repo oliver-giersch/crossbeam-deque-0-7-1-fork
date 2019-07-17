@@ -89,8 +89,8 @@
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
-extern crate crossbeam_epoch as epoch;
 extern crate crossbeam_utils as utils;
+extern crate debra;
 
 use std::cell::{Cell, UnsafeCell};
 use std::cmp;
@@ -102,8 +102,12 @@ use std::ptr;
 use std::sync::atomic::{self, AtomicIsize, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use epoch::{Atomic, Owned};
+use debra::reclaim::GlobalReclaim;
+use debra::{Config, Debra, Guard, CONFIG};
 use utils::{Backoff, CachePadded};
+
+type Atomic<T> = debra::Atomic<T, debra::typenum::U0>;
+type Owned<T> = debra::Owned<T, debra::typenum::U0>;
 
 // Minimum buffer capacity.
 const MIN_CAP: usize = 64;
@@ -213,17 +217,17 @@ impl<T> Drop for Inner<T> {
         let f = self.front.load(Ordering::Relaxed);
 
         unsafe {
-            let buffer = self.buffer.load(Ordering::Relaxed, epoch::unprotected());
+            let buffer = self.buffer.take().unwrap_unchecked();
 
             // Go through the buffer from front to back and drop all tasks in the queue.
             let mut i = f;
             while i != b {
-                ptr::drop_in_place(buffer.deref().at(i));
+                ptr::drop_in_place(buffer.at(i));
                 i = i.wrapping_add(1);
             }
 
             // Free the memory allocated by the buffer.
-            buffer.into_owned().into_box().dealloc();
+            buffer.dealloc();
         }
     }
 }
@@ -307,6 +311,7 @@ impl<T> Worker<T> {
     /// let w = Worker::<i32>::new_fifo();
     /// ```
     pub fn new_fifo() -> Worker<T> {
+        CONFIG.init_once(|| Config::with_params(120, 0));
         let buffer = Buffer::alloc(MIN_CAP);
 
         let inner = Arc::new(CachePadded::new(Inner {
@@ -335,6 +340,7 @@ impl<T> Worker<T> {
     /// let w = Worker::<i32>::new_lifo();
     /// ```
     pub fn new_lifo() -> Worker<T> {
+        CONFIG.init_once(|| Config::with_params(120, 0));
         let buffer = Buffer::alloc(MIN_CAP);
 
         let inner = Arc::new(CachePadded::new(Inner {
@@ -386,22 +392,21 @@ impl<T> Worker<T> {
             i = i.wrapping_add(1);
         }
 
-        let guard = &epoch::pin();
-
         // Replace the old buffer with the new one.
         self.buffer.replace(new);
-        let old =
-            self.inner
-                .buffer
-                .swap(Owned::new(new).into_shared(guard), Ordering::Release, guard);
+        let old = self
+            .inner
+            .buffer
+            .swap(Owned::new(new), Ordering::Release)
+            .unwrap_unchecked();
 
         // Destroy the old buffer later.
-        guard.defer_unchecked(move || old.into_owned().into_box().dealloc());
+        old.retire_unchecked();
 
         // If the buffer is very large, then flush the thread-local garbage in order to deallocate
         // it as soon as possible.
         if mem::size_of::<T>() * new_cap >= FLUSH_THRESHOLD_BYTES {
-            guard.flush();
+            Debra::try_flush();
         }
     }
 
@@ -581,7 +586,8 @@ impl<T> Worker<T> {
                                 f.wrapping_add(1),
                                 Ordering::SeqCst,
                                 Ordering::Relaxed,
-                            ).is_err()
+                            )
+                            .is_err()
                         {
                             // Failed. We didn't pop anything.
                             mem::forget(task.take());
@@ -686,11 +692,11 @@ impl<T> Stealer<T> {
         // If the current thread is already pinned (reentrantly), we must manually issue the
         // fence. Otherwise, the following pinning will issue the fence anyway, so we don't
         // have to.
-        if epoch::is_pinned() {
+        if Debra::is_thread_active() {
             atomic::fence(Ordering::SeqCst);
         }
 
-        let guard = &epoch::pin();
+        let guard = &Guard::new();
 
         // Load the back index.
         let b = self.inner.back.load(Ordering::Acquire);
@@ -701,8 +707,13 @@ impl<T> Stealer<T> {
         }
 
         // Load the buffer and read the task at the front.
-        let buffer = self.inner.buffer.load(Ordering::Acquire, guard);
-        let task = unsafe { buffer.deref().read(f) };
+        let task = unsafe {
+            self.inner
+                .buffer
+                .load(Ordering::Acquire, guard)
+                .unwrap_unchecked()
+                .read(f)
+        };
 
         // Try incrementing the front index to steal the task.
         if self
@@ -752,11 +763,11 @@ impl<T> Stealer<T> {
         // If the current thread is already pinned (reentrantly), we must manually issue the
         // fence. Otherwise, the following pinning will issue the fence anyway, so we don't
         // have to.
-        if epoch::is_pinned() {
+        if Debra::is_thread_active() {
             atomic::fence(Ordering::SeqCst);
         }
 
-        let guard = &epoch::pin();
+        let guard = &Guard::new();
 
         // Load the back index.
         let b = self.inner.back.load(Ordering::Acquire);
@@ -777,7 +788,12 @@ impl<T> Stealer<T> {
         let mut dest_b = dest.inner.back.load(Ordering::Relaxed);
 
         // Load the buffer.
-        let buffer = self.inner.buffer.load(Ordering::Acquire, guard);
+        let buffer = unsafe {
+            self.inner
+                .buffer
+                .load(Ordering::Acquire, guard)
+                .unwrap_unchecked()
+        };
 
         match self.flavor {
             // Steal a batch of tasks from the front at once.
@@ -787,7 +803,7 @@ impl<T> Stealer<T> {
                     Flavor::Fifo => {
                         for i in 0..batch_size {
                             unsafe {
-                                let task = buffer.deref().read(f.wrapping_add(i));
+                                let task = buffer.read(f.wrapping_add(i));
                                 dest_buffer.write(dest_b.wrapping_add(i), task);
                             }
                         }
@@ -795,7 +811,7 @@ impl<T> Stealer<T> {
                     Flavor::Lifo => {
                         for i in 0..batch_size {
                             unsafe {
-                                let task = buffer.deref().read(f.wrapping_add(i));
+                                let task = buffer.read(f.wrapping_add(i));
                                 dest_buffer.write(dest_b.wrapping_add(batch_size - 1 - i), task);
                             }
                         }
@@ -811,7 +827,8 @@ impl<T> Stealer<T> {
                         f.wrapping_add(batch_size),
                         Ordering::SeqCst,
                         Ordering::Relaxed,
-                    ).is_err()
+                    )
+                    .is_err()
                 {
                     return Steal::Retry;
                 }
@@ -839,7 +856,7 @@ impl<T> Stealer<T> {
                     }
 
                     // Read the task at the front.
-                    let task = unsafe { buffer.deref().read(f) };
+                    let task = unsafe { buffer.read(f) };
 
                     // Try incrementing the front index to steal the task.
                     if self
@@ -891,9 +908,7 @@ impl<T> Stealer<T> {
         //
         // This ordering could be `Relaxed`, but then thread sanitizer would falsely report data
         // races because it doesn't understand fences.
-        dest.inner
-            .back
-            .store(dest_b, Ordering::Release);
+        dest.inner.back.store(dest_b, Ordering::Release);
 
         // Return with success.
         Steal::Success(())
@@ -930,11 +945,11 @@ impl<T> Stealer<T> {
         // If the current thread is already pinned (reentrantly), we must manually issue the
         // fence. Otherwise, the following pinning will issue the fence anyway, so we don't
         // have to.
-        if epoch::is_pinned() {
+        if Debra::is_thread_active() {
             atomic::fence(Ordering::SeqCst);
         }
 
-        let guard = &epoch::pin();
+        let guard = &Guard::new();
 
         // Load the back index.
         let b = self.inner.back.load(Ordering::Acquire);
@@ -955,10 +970,15 @@ impl<T> Stealer<T> {
         let mut dest_b = dest.inner.back.load(Ordering::Relaxed);
 
         // Load the buffer
-        let buffer = self.inner.buffer.load(Ordering::Acquire, guard);
+        let buffer = unsafe {
+            self.inner
+                .buffer
+                .load(Ordering::Acquire, guard)
+                .unwrap_unchecked()
+        };
 
         // Read the task at the front.
-        let mut task = unsafe { buffer.deref().read(f) };
+        let mut task = unsafe { buffer.read(f) };
 
         match self.flavor {
             // Steal a batch of tasks from the front at once.
@@ -968,7 +988,7 @@ impl<T> Stealer<T> {
                     Flavor::Fifo => {
                         for i in 0..batch_size {
                             unsafe {
-                                let task = buffer.deref().read(f.wrapping_add(i + 1));
+                                let task = buffer.read(f.wrapping_add(i + 1));
                                 dest_buffer.write(dest_b.wrapping_add(i), task);
                             }
                         }
@@ -976,7 +996,7 @@ impl<T> Stealer<T> {
                     Flavor::Lifo => {
                         for i in 0..batch_size {
                             unsafe {
-                                let task = buffer.deref().read(f.wrapping_add(i + 1));
+                                let task = buffer.read(f.wrapping_add(i + 1));
                                 dest_buffer.write(dest_b.wrapping_add(batch_size - 1 - i), task);
                             }
                         }
@@ -992,7 +1012,8 @@ impl<T> Stealer<T> {
                         f.wrapping_add(batch_size + 1),
                         Ordering::SeqCst,
                         Ordering::Relaxed,
-                    ).is_err()
+                    )
+                    .is_err()
                 {
                     // We didn't steal this task, forget it.
                     mem::forget(task);
@@ -1035,7 +1056,7 @@ impl<T> Stealer<T> {
                     }
 
                     // Read the task at the front.
-                    let tmp = unsafe { buffer.deref().read(f) };
+                    let tmp = unsafe { buffer.read(f) };
 
                     // Try incrementing the front index to steal the task.
                     if self
@@ -1082,9 +1103,7 @@ impl<T> Stealer<T> {
         //
         // This ordering could be `Relaxed`, but then thread sanitizer would falsely report data
         // races because it doesn't understand fences.
-        dest.inner
-            .back
-            .store(dest_b, Ordering::Release);
+        dest.inner.back.store(dest_b, Ordering::Release);
 
         // Return with success.
         Steal::Success(task)
@@ -1296,14 +1315,12 @@ impl<T> Injector<T> {
             let new_tail = tail + (1 << SHIFT);
 
             // Try advancing the tail forward.
-            match self.tail.index
-                .compare_exchange_weak(
-                    tail,
-                    new_tail,
-                    Ordering::SeqCst,
-                    Ordering::Acquire,
-                )
-            {
+            match self.tail.index.compare_exchange_weak(
+                tail,
+                new_tail,
+                Ordering::SeqCst,
+                Ordering::Acquire,
+            ) {
                 Ok(_) => unsafe {
                     // If we've reached the end of the block, install the next one.
                     if offset + 1 == BLOCK_CAP {
@@ -1321,7 +1338,7 @@ impl<T> Injector<T> {
                     slot.state.fetch_or(WRITE, Ordering::Release);
 
                     return;
-                }
+                },
                 Err(t) => {
                     tail = t;
                     block = self.tail.block.load(Ordering::Acquire);
@@ -1385,13 +1402,10 @@ impl<T> Injector<T> {
         }
 
         // Try moving the head index forward.
-        if self.head.index
-            .compare_exchange_weak(
-                head,
-                new_head,
-                Ordering::SeqCst,
-                Ordering::Acquire,
-            )
+        if self
+            .head
+            .index
+            .compare_exchange_weak(head, new_head, Ordering::SeqCst, Ordering::Acquire)
             .is_err()
         {
             return Steal::Retry;
@@ -1502,13 +1516,10 @@ impl<T> Injector<T> {
         let new_offset = offset + advance;
 
         // Try moving the head index forward.
-        if self.head.index
-            .compare_exchange_weak(
-                head,
-                new_head,
-                Ordering::SeqCst,
-                Ordering::Acquire,
-            )
+        if self
+            .head
+            .index
+            .compare_exchange_weak(head, new_head, Ordering::SeqCst, Ordering::Acquire)
             .is_err()
         {
             return Steal::Retry;
@@ -1665,13 +1676,10 @@ impl<T> Injector<T> {
         let new_offset = offset + advance;
 
         // Try moving the head index forward.
-        if self.head.index
-            .compare_exchange_weak(
-                head,
-                new_head,
-                Ordering::SeqCst,
-                Ordering::Acquire,
-            )
+        if self
+            .head
+            .index
+            .compare_exchange_weak(head, new_head, Ordering::SeqCst, Ordering::Acquire)
             .is_err()
         {
             return Steal::Retry;
@@ -2003,6 +2011,25 @@ impl<T> FromIterator<Steal<T>> for Steal<T> {
             Steal::Retry
         } else {
             Steal::Empty
+        }
+    }
+}
+
+trait UnwrapUnchecked {
+    type Item;
+
+    unsafe fn unwrap_unchecked(self) -> Self::Item;
+}
+
+impl<T> UnwrapUnchecked for Option<T> {
+    type Item = T;
+
+    #[inline]
+    unsafe fn unwrap_unchecked(self) -> Self::Item {
+        use std::hint::unreachable_unchecked;
+        match self {
+            Some(val) => val,
+            None => unreachable_unchecked(),
         }
     }
 }

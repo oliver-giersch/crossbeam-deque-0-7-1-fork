@@ -90,7 +90,7 @@
 #![warn(missing_debug_implementations)]
 
 extern crate crossbeam_utils as utils;
-extern crate debra;
+extern crate hazptr;
 
 use std::cell::{Cell, UnsafeCell};
 use std::cmp;
@@ -102,12 +102,12 @@ use std::ptr;
 use std::sync::atomic::{self, AtomicIsize, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use debra::reclaim::GlobalReclaim;
-use debra::{Config, Debra, Guard, CONFIG};
+use hazptr::reclaim::GlobalReclaim;
+use hazptr::{Config, Guard, CONFIG, HP};
 use utils::{Backoff, CachePadded};
 
-type Atomic<T> = debra::Atomic<T, debra::typenum::U0>;
-type Owned<T> = debra::Owned<T, debra::typenum::U0>;
+type Atomic<T> = hazptr::Atomic<T, hazptr::typenum::U0>;
+type Owned<T> = hazptr::Owned<T, hazptr::typenum::U0>;
 
 // Minimum buffer capacity.
 const MIN_CAP: usize = 64;
@@ -311,7 +311,7 @@ impl<T> Worker<T> {
     /// let w = Worker::<i32>::new_fifo();
     /// ```
     pub fn new_fifo() -> Worker<T> {
-        CONFIG.init_once(|| Config::with_params(120, 0));
+        CONFIG.init_once(|| Config::with_params(!0));
         let buffer = Buffer::alloc(MIN_CAP);
 
         let inner = Arc::new(CachePadded::new(Inner {
@@ -340,7 +340,7 @@ impl<T> Worker<T> {
     /// let w = Worker::<i32>::new_lifo();
     /// ```
     pub fn new_lifo() -> Worker<T> {
-        CONFIG.init_once(|| Config::with_params(120, 0));
+        CONFIG.init_once(|| Config::with_params(!0));
         let buffer = Buffer::alloc(MIN_CAP);
 
         let inner = Arc::new(CachePadded::new(Inner {
@@ -406,7 +406,7 @@ impl<T> Worker<T> {
         // If the buffer is very large, then flush the thread-local garbage in order to deallocate
         // it as soon as possible.
         if mem::size_of::<T>() * new_cap >= FLUSH_THRESHOLD_BYTES {
-            Debra::try_flush();
+            HP::try_flush();
         }
     }
 
@@ -687,16 +687,8 @@ impl<T> Stealer<T> {
         // Load the front index.
         let f = self.inner.front.load(Ordering::Acquire);
 
-        // A SeqCst fence is needed here.
-        //
-        // If the current thread is already pinned (reentrantly), we must manually issue the
-        // fence. Otherwise, the following pinning will issue the fence anyway, so we don't
-        // have to.
-        if Debra::is_thread_active() {
-            atomic::fence(Ordering::SeqCst);
-        }
-
-        let guard = &Guard::new();
+        atomic::fence(Ordering::SeqCst);
+        let guard = &mut Guard::new();
 
         // Load the back index.
         let b = self.inner.back.load(Ordering::Acquire);
@@ -758,16 +750,9 @@ impl<T> Stealer<T> {
         // Load the front index.
         let mut f = self.inner.front.load(Ordering::Acquire);
 
-        // A SeqCst fence is needed here.
-        //
-        // If the current thread is already pinned (reentrantly), we must manually issue the
-        // fence. Otherwise, the following pinning will issue the fence anyway, so we don't
-        // have to.
-        if Debra::is_thread_active() {
-            atomic::fence(Ordering::SeqCst);
-        }
+        atomic::fence(Ordering::SeqCst);
 
-        let guard = &Guard::new();
+        let guard = &mut Guard::new();
 
         // Load the back index.
         let b = self.inner.back.load(Ordering::Acquire);
@@ -940,16 +925,9 @@ impl<T> Stealer<T> {
         // Load the front index.
         let mut f = self.inner.front.load(Ordering::Acquire);
 
-        // A SeqCst fence is needed here.
-        //
-        // If the current thread is already pinned (reentrantly), we must manually issue the
-        // fence. Otherwise, the following pinning will issue the fence anyway, so we don't
-        // have to.
-        if Debra::is_thread_active() {
-            atomic::fence(Ordering::SeqCst);
-        }
+        atomic::fence(Ordering::SeqCst);
 
-        let guard = &Guard::new();
+        let guard = &mut Guard::new();
 
         // Load the back index.
         let b = self.inner.back.load(Ordering::Acquire);

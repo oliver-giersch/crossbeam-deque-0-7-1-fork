@@ -103,7 +103,7 @@ use std::sync::atomic::{self, AtomicIsize, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use hazptr::reclaim::GlobalReclaim;
-use hazptr::{Config, Guard, CONFIG, HP};
+use hazptr::{ConfigBuilder, Guard, CONFIG, HP};
 use utils::{Backoff, CachePadded};
 
 type Atomic<T> = hazptr::Atomic<T, hazptr::typenum::U0>;
@@ -311,7 +311,7 @@ impl<T> Worker<T> {
     /// let w = Worker::<i32>::new_fifo();
     /// ```
     pub fn new_fifo() -> Worker<T> {
-        CONFIG.init_once(|| Config::with_params(!0));
+        CONFIG.init_once(|| ConfigBuilder::new().scan_threshold(!0).build());
         let buffer = Buffer::alloc(MIN_CAP);
 
         let inner = Arc::new(CachePadded::new(Inner {
@@ -340,7 +340,7 @@ impl<T> Worker<T> {
     /// let w = Worker::<i32>::new_lifo();
     /// ```
     pub fn new_lifo() -> Worker<T> {
-        CONFIG.init_once(|| Config::with_params(!0));
+        CONFIG.init_once(|| ConfigBuilder::new().scan_threshold(!0).build());
         let buffer = Buffer::alloc(MIN_CAP);
 
         let inner = Arc::new(CachePadded::new(Inner {

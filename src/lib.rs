@@ -115,7 +115,7 @@ const MIN_CAP: usize = 64;
 const MAX_BATCH: usize = 32;
 // If a buffer of at least this size is retired, thread-local garbage is flushed so that it gets
 // deallocated as soon as possible.
-const FLUSH_THRESHOLD_BYTES: usize = 1 << 32;
+const FLUSH_THRESHOLD_BYTES: usize = 1 << 14;
 
 /// A buffer that holds tasks in a worker queue.
 ///

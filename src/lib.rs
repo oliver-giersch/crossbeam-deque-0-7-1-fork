@@ -115,7 +115,7 @@ const MIN_CAP: usize = 64;
 const MAX_BATCH: usize = 32;
 // If a buffer of at least this size is retired, thread-local garbage is flushed so that it gets
 // deallocated as soon as possible.
-const FLUSH_THRESHOLD_BYTES: usize = 1 << 14;
+const FLUSH_THRESHOLD_BYTES: usize = 1 << 10;
 
 /// A buffer that holds tasks in a worker queue.
 ///
@@ -311,11 +311,11 @@ impl<T> Worker<T> {
     /// let w = Worker::<i32>::new_fifo();
     /// ```
     pub fn new_fifo() -> Worker<T> {
-        CONFIG.init_once(|| ConfigBuilder::new()
+        /*CONFIG.init_once(|| ConfigBuilder::new()
             .min_required_records(4)
             .scan_threshold(!0)
             .build()
-        );
+        );*/
         let buffer = Buffer::alloc(MIN_CAP);
 
         let inner = Arc::new(CachePadded::new(Inner {
@@ -344,11 +344,11 @@ impl<T> Worker<T> {
     /// let w = Worker::<i32>::new_lifo();
     /// ```
     pub fn new_lifo() -> Worker<T> {
-        CONFIG.init_once(|| ConfigBuilder::new()
+        /*CONFIG.init_once(|| ConfigBuilder::new()
             .min_required_records(4)
             .scan_threshold(!0)
             .build()
-        );
+        );*/
         let buffer = Buffer::alloc(MIN_CAP);
 
         let inner = Arc::new(CachePadded::new(Inner {

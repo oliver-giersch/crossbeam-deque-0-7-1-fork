@@ -311,11 +311,12 @@ impl<T> Worker<T> {
     /// let w = Worker::<i32>::new_fifo();
     /// ```
     pub fn new_fifo() -> Worker<T> {
-        /*CONFIG.init_once(|| ConfigBuilder::new()
-            .min_required_records(4)
-            .scan_threshold(!0)
+        CONFIG.init_once(|| ConfigBuilder::new()
+            .min_required_records(2)
+            .scan_threshold(128)
             .build()
-        );*/
+        );
+        
         let buffer = Buffer::alloc(MIN_CAP);
 
         let inner = Arc::new(CachePadded::new(Inner {
@@ -344,11 +345,12 @@ impl<T> Worker<T> {
     /// let w = Worker::<i32>::new_lifo();
     /// ```
     pub fn new_lifo() -> Worker<T> {
-        /*CONFIG.init_once(|| ConfigBuilder::new()
-            .min_required_records(4)
-            .scan_threshold(!0)
+        CONFIG.init_once(|| ConfigBuilder::new()
+            .min_required_records(2)
+            .scan_threshold(128)
             .build()
-        );*/
+        );
+        
         let buffer = Buffer::alloc(MIN_CAP);
 
         let inner = Arc::new(CachePadded::new(Inner {

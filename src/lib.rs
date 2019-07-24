@@ -313,7 +313,7 @@ impl<T> Worker<T> {
     pub fn new_fifo() -> Worker<T> {
         CONFIG.init_once(|| ConfigBuilder::new()
             .min_required_records(0)
-            .scan_threshold(4096)
+            .scan_threshold(64)
             .build()
         );
         
@@ -347,7 +347,7 @@ impl<T> Worker<T> {
     pub fn new_lifo() -> Worker<T> {
         CONFIG.init_once(|| ConfigBuilder::new()
             .min_required_records(0)
-            .scan_threshold(4096)
+            .scan_threshold(64)
             .build()
         );
         
